@@ -1,4 +1,6 @@
 var _ = require('underscore');
+var apiStreamModel = new cloudApp.cloudFx.NosSolariaModel();
+ 
 
 function NosDesktopSync(configObj) {
     if (!(this instanceof NosDesktopSync)) {
@@ -99,12 +101,15 @@ NosDesktopSync.prototype.normalizeQueue = function() {
         }
     }
 
+    // Remove duplicate ids
     idsToRemove = _.uniq(idsToRemove);
 
     if (idsToRemove.length > 0) {
         console.log('Normalizing Queue -- Ids to remove:', idsToRemove);
         // console.log('Queue before normalizing:', this.msgQueue);
-        this.msgQueue = this.msgQueue.filter(item => _.indexOf(idsToRemove, item._id) === -1);
+        this.msgQueue = this.msgQueue.filter(function(item) { 
+            return _.indexOf(idsToRemove, item._id) === -1; 
+        });
         console.log('Normalized:', _.pluck(this.msgQueue, '_id'));
     }
 };
@@ -220,10 +225,17 @@ NosDesktopSync.prototype.start = function() {
     // Note: When Desktop is offline, use separate method for saving new events to database for later sync?
     //    OR: use Journal processing to determine change set at time desktop comes online?
 
-    var iter = 0;
-
+    
+    var iteration = 0;
     var _checkQueue = function() {
-        console.log('\nChecking queue, iteration:', iter++);
+        iteration++;
+        console.log('\nChecking queue, iteration:', iteration);
+
+        if (this.desktopStatus !== 'online') {
+            console.log('Desktop is offline. Sync operations suspended.');
+            return;
+        }
+
 
         // Process queue
         if (self.msgQueue.length > 0) {
@@ -281,6 +293,15 @@ NosDesktopSync.prototype.configure = function(confObj) {
     // etc.
 };
 
+NosDesktopSync.prototype.checkDesktopStatus = function() {
+    // var url = '/d/v1/desktopStatus/desktop';
+    // var Nos = require(currWorkingDir + '/lib/citta-cloud-fx/events/NosEventSubClient.js');
+
+    var apiStreamPersistence = require(currWorkingDir + '/lib/citta-cloud-fx/events/NosEventSubClient.js');
+
+
+};
+
 exports = module.exports = NosDesktopSync;
 
 
@@ -327,11 +348,3 @@ var sync = new NosDesktopSync({
 
 addSampleData(sync);
 */
-
-var sync = new NosDesktopSync({
-    batchSize: 2,
-    debounceRate: 10000,
-    syncRate: 2000,
-    ackRate: 5000,
-    database: 'mine'
-});
