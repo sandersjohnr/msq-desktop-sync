@@ -1,27 +1,32 @@
 var _ = require('underscore');
 
-function NosDesktopSync({ batchSize, debounceRate, syncRate, ackRate }) {
+function NosDesktopSync(configObj) {
     if (!(this instanceof NosDesktopSync)) {
         return new NosDesktopSync();
     }
 
-    this.batchSize = batchSize || 5;
-    this.debounceRate = debounceRate || 10 * 1000;
-    this.syncRate = syncRate || 3 * 1000;
-    this.ackRate = ackRate || 10 * 1000;
+    this.database = configObj.database || null;
+
+    this.batchSize = configObj.batchSize || 5;
+    this.debounceRate = configObj.debounceRate || 10 * 1000;
+    this.syncRate = configObj.syncRate || 3 * 1000;
+    this.ackRate = configObj.ackRate || 10 * 1000;
+
+    this.msgQueue = [];
+    this.sentPackets = [];
+    this.receivedACKs = [];
+
     this.lastId = 0;
     this.lastPacket = null;
     this.lastPacketResent = null;
     this.lastDebounce = Date.now();
-    this.sentPackets = [];
+
     this.desktopStatus = null;
     this.engineStatus = 'initialized';
     this.packetStatus = 'INIT';
+
     this.syncIntervalId = null;
-    this.msgQueue = [];
-    this.receivedACKs = [];
     this.ACK_OVERRIDE = false;
-    this.database = null;
 }
 
 NosDesktopSync.prototype.overrideACKs = function(bool) {
@@ -41,13 +46,17 @@ NosDesktopSync.prototype.addMsgToQueue = function(msg, objId) {
     };
 
     this.msgQueue.push(msgObj);
-    console.log('Queue:', this.msgQueue.map(msg => msg.payload).join(' '));
+    console.log('Queue:', this.msgQueue.map(function(msg) { return msg.payload }).join(' '));
 
     // Reset debounce timer for processing Queue
     this.lastDebounce = Date.now();
 
+
+    // TODO Aurora perspective:
     // If Desktop status is online, keep processing
-    // Else this.stop();
+    // Else either this.stop(); or just skip iteration
+    // Once Desktop status is online again, begin processing
+
 };
 
 NosDesktopSync.prototype.dequeueBatch = function() {
@@ -70,13 +79,11 @@ NosDesktopSync.prototype.dequeueBatch = function() {
 };
 
 NosDesktopSync.prototype.createDataPacket = function(msgBatch) {
-    var dataPacket = {
+    return {
         _id: this.lastId++,
-        timestamp: Date.now(),//this.timestamp++,
-        msgList: msgBatch,
+        timestamp: Date.now(),
+        msgList: msgBatch
     };
-
-    return dataPacket;
 };
 
 NosDesktopSync.prototype.normalizeQueue = function() {
@@ -84,8 +91,8 @@ NosDesktopSync.prototype.normalizeQueue = function() {
     var idsToRemove = [];
 
     // Remove all but the most recent update for any given objectId
-    for (let i = 0; i < q.length; i++) {
-        for (let j = i + 1; j < q.length; j++) {
+    for (var i = 0; i < q.length; i++) {
+        for (var j = i + 1; j < q.length; j++) {
             if (q[i].objId === q[j].objId) {
                 idsToRemove.push(q[i].timestamp < q[j].timestamp ? q[i]._id : q[j]._id);
             }
@@ -107,7 +114,9 @@ NosDesktopSync.prototype.processQueueForSyncOp = function() {
     console.log('Processing Queue for Sync');
 
     var timeSinceLastDebounce = Date.now() - this.lastDebounce;
-    var debounceExpired = () => timeSinceLastDebounce > this.debounceRate;
+    var debounceExpired = function() {
+        return timeSinceLastDebounce > self.debounceRate;
+    };
 
     console.log('timeSinceLastDebounce:', timeSinceLastDebounce);
 
@@ -120,6 +129,7 @@ NosDesktopSync.prototype.processQueueForSyncOp = function() {
     self.normalizeQueue();
 
     var packet = self.createDataPacket(self.dequeueBatch());
+    console.log('Created Packet:', packet);
 
     // Save packet to registered database
     self.commitPacket(packet, function(err, success) {
@@ -133,7 +143,6 @@ NosDesktopSync.prototype.processQueueForSyncOp = function() {
                 self.packetStatus = 'ACK_PENDING';
 
                 // TODO Wait for ACK before sending next packet
-                console.log('Data Packet:', self.lastPacket);
                 console.log('Remaining Queue:', _.pluck(self.msgQueue, '_id'));
 
             });
@@ -165,7 +174,7 @@ NosDesktopSync.prototype.sendPacket = function(packet, cb) {
 
 NosDesktopSync.prototype.resendLastPacket = function() {
     console.log('Resending last packet:', this.lastPacket);
-    this.sendPacket(this.lastPacket, ()=>{});
+    this.sendPacket(this.lastPacket, function(){});
     this.lastPacketResent = Date.now();
 };
 
@@ -214,7 +223,7 @@ NosDesktopSync.prototype.start = function() {
     var iter = 0;
 
     var _checkQueue = function() {
-        console.log('Checking queue, iteration:', iter++);
+        console.log('\nChecking queue, iteration:', iter++);
 
         // Process queue
         if (self.msgQueue.length > 0) {
@@ -261,7 +270,7 @@ NosDesktopSync.prototype.receivePacket = function(recdPacket) {
     // This method will be called by endpoint receiving the packet
     var msgList = recdPacket.msgList;
 
-    msgList.forEach(msg => {
+    msgList.forEach(function(msg) {
         // Apply event message to device / Aurora
     });
 };
@@ -270,48 +279,59 @@ NosDesktopSync.prototype.configure = function(confObj) {
     this.database = confObj.db;
     this.postEndpoint = confObj.postEndpoint;
     // etc.
+};
+
+exports = module.exports = NosDesktopSync;
+
+
+/*****************************************
+ * SETUP FOR TESTING -- Not part of module
+ *****************************************/
+/*
+function addSampleData(api) {
+    api.addMsgToQueue('Hello', 4);
+    setTimeout(() => api.addMsgToQueue('world', 8), 100);
+    setTimeout(() => api.addMsgToQueue('get', 8), 120);
+    setTimeout(() => api.addMsgToQueue('on', 15), 140);
+    setTimeout(() => api.addMsgToQueue('down', 16), 160);
+    setTimeout(() => api.addMsgToQueue('like', 23), 180);
+    setTimeout(() => api.addMsgToQueue('another', 15), 200);
+    setTimeout(() => api.addMsgToQueue('tasty', 15), 220);
+    setTimeout(() => api.addMsgToQueue('dance', 42), 240);
+    setTimeout(() => api.addMsgToQueue('craze?', 42), 260);
+    setTimeout(() => api.addMsgToQueue('no?', 43), 280);
+    setTimeout(() => api.addMsgToQueue('fine!', 44), 300);
+    setTimeout(() => api.addMsgToQueue('adfgadf?', 45), 320);
+    setTimeout(() => api.addMsgToQueue('sausage?', 46), 340);
+    setTimeout(() => api.addMsgToQueue('dfbadfbadbfdabf'), 360);
+    setTimeout(() => api.addMsgToQueue('heyooo!!', 48), 380);
+    setTimeout(() => api.addMsgToQueue('asdfasdfasdf?', 49), 400);
+    setTimeout(() => api.addMsgToQueue('flarf?', 50), 420);
+    setTimeout(() => api.addMsgToQueue('narf?', 50), 440);
+    setTimeout(() => api.addMsgToQueue('sausage?', 42), 460);
+    setTimeout(() => api.addMsgToQueue('derp', 42), 480);
+    setTimeout(() => api.addMsgToQueue('doo', 42), 500);
+    setTimeout(() => api.addMsgToQueue('sausagasdfasdfasdfasdfasdfe?', 42), 520);
+    setTimeout(() => api.addMsgToQueue({ what: 'what', the: 'hell', you: 'say' }, 98), 540);
 }
 
-//exports = module.exports = NosDesktopSync;
+var sync = new NosDesktopSync({
+    batchSize: 2,
+    debounceRate: 10000,
+    syncRate: 2000,
+    ackRate: 5000,
+    database: 'mine'
+});
 
-//
-// /*****************************************
-//  * SETUP FOR TESTING -- Not part of module
-//  *****************************************/
-//
-// function addSampleData(api) {
-//     api.addMsgToQueue('Hello', 4);
-//     setTimeout(() => api.addMsgToQueue('world', 8), 100);
-//     setTimeout(() => api.addMsgToQueue('get', 8), 120);
-//     setTimeout(() => api.addMsgToQueue('on', 15), 140);
-//     setTimeout(() => api.addMsgToQueue('down', 16), 160);
-//     setTimeout(() => api.addMsgToQueue('like', 23), 180);
-//     setTimeout(() => api.addMsgToQueue('another', 15), 200);
-//     setTimeout(() => api.addMsgToQueue('tasty', 15), 220);
-//     setTimeout(() => api.addMsgToQueue('dance', 42), 240);
-//     setTimeout(() => api.addMsgToQueue('craze?', 42), 260);
-//     setTimeout(() => api.addMsgToQueue('no?', 43), 280);
-//     setTimeout(() => api.addMsgToQueue('fine!', 44), 300);
-//     setTimeout(() => api.addMsgToQueue('adfgadf?', 45), 320);
-//     setTimeout(() => api.addMsgToQueue('sausage?', 46), 340);
-//     setTimeout(() => api.addMsgToQueue('dfbadfbadbfdabf'), 360);
-//     setTimeout(() => api.addMsgToQueue('heyooo!!', 48), 380);
-//     setTimeout(() => api.addMsgToQueue('asdfasdfasdf?', 49), 400);
-//     setTimeout(() => api.addMsgToQueue('flarf?', 50), 420);
-//     setTimeout(() => api.addMsgToQueue('narf?', 50), 440);
-//     setTimeout(() => api.addMsgToQueue('sausage?', 42), 460);
-//     setTimeout(() => api.addMsgToQueue('derp', 42), 480);
-//     setTimeout(() => api.addMsgToQueue('doo', 42), 500);
-//     setTimeout(() => api.addMsgToQueue('sausagasdfasdfasdfasdfasdfe?', 42), 520);
-//     setTimeout(() => api.addMsgToQueue({ what: 'what', the: 'hell', you: 'say' }, 98), 540);
-// }
-//
-// var sync = new NosDesktopSync({
-//     batchSize: 2,
-//     debounceRate: 10000,
-//     syncRate: 2000,
-//     ackRate: 5000,
-// });
-//
-// addSampleData(sync);
 
+
+addSampleData(sync);
+*/
+
+var sync = new NosDesktopSync({
+    batchSize: 2,
+    debounceRate: 10000,
+    syncRate: 2000,
+    ackRate: 5000,
+    database: 'mine'
+});
