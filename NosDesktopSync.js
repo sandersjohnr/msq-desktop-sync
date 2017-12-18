@@ -1,18 +1,20 @@
 var _ = require('underscore');
-var apiStreamModel = new cloudApp.cloudFx.NosSolariaModel();
- 
 
 function NosDesktopSync(configObj) {
     if (!(this instanceof NosDesktopSync)) {
         return new NosDesktopSync();
     }
+    
+    // this.solariaStore = configObj.solariaStore;
+    // this.solariaModel = configObj.solariaModel;
 
     this.database = configObj.database || null;
-
     this.batchSize = configObj.batchSize || 5;
     this.debounceRate = configObj.debounceRate || 10 * 1000;
     this.syncRate = configObj.syncRate || 3 * 1000;
     this.ackRate = configObj.ackRate || 10 * 1000;
+    
+    this.desktopOfflineTimeout = 20 * 1000;
 
     this.msgQueue = [];
     this.sentPackets = [];
@@ -20,6 +22,7 @@ function NosDesktopSync(configObj) {
 
     this.lastId = 0;
     this.lastPacket = null;
+    this.lastPacketFirstSent = null;
     this.lastPacketResent = null;
     this.lastDebounce = Date.now();
 
@@ -52,13 +55,6 @@ NosDesktopSync.prototype.addMsgToQueue = function(msg, objId) {
 
     // Reset debounce timer for processing Queue
     this.lastDebounce = Date.now();
-
-
-    // TODO Aurora perspective:
-    // If Desktop status is online, keep processing
-    // Else either this.stop(); or just skip iteration
-    // Once Desktop status is online again, begin processing
-
 };
 
 NosDesktopSync.prototype.dequeueBatch = function() {
@@ -123,39 +119,36 @@ NosDesktopSync.prototype.processQueueForSyncOp = function() {
         return timeSinceLastDebounce > self.debounceRate;
     };
 
-    console.log('timeSinceLastDebounce:', timeSinceLastDebounce);
+    // console.log('timeSinceLastDebounce:', timeSinceLastDebounce);
 
     if (!debounceExpired()) {
-        // if (true) {
         console.log('Waiting for debounce...');
-        return;
+        
+    } else {
+        self.normalizeQueue();
+
+        var packet = self.createDataPacket(self.dequeueBatch());
+        console.log('Created Packet:', packet);
+
+        // Save packet to registered database
+        self.commitPacket(packet, function (err, success) {
+            if (success) {
+                // Send packet to registered endpoint
+                self.sendPacket(packet, function () {
+                    
+                    self.packetStatus = 'ACK_PENDING';
+                    self.lastPacket = packet;
+                    self.lastPacketResent = packet.timestamp;
+                    self.sentPackets.push(packet);
+
+                    console.log('Remaining Queue:', _.pluck(self.msgQueue, '_id'));
+                });
+
+            } else {
+                console.log('Error committing packet to database.');
+            }
+        });
     }
-
-    self.normalizeQueue();
-
-    var packet = self.createDataPacket(self.dequeueBatch());
-    console.log('Created Packet:', packet);
-
-    // Save packet to registered database
-    self.commitPacket(packet, function(err, success) {
-        if (success) {
-            // Send packet to registered endpoint
-            self.sendPacket(packet, function() {
-
-                self.lastPacket = packet;
-                self.lastPacketResent = packet.timestamp;
-                self.sentPackets.push(packet);
-                self.packetStatus = 'ACK_PENDING';
-
-                // TODO Wait for ACK before sending next packet
-                console.log('Remaining Queue:', _.pluck(self.msgQueue, '_id'));
-
-            });
-
-        } else {
-            console.log('Error committing packet to database.');
-        }
-    });
 };
 
 NosDesktopSync.prototype.commitPacket = function(packet, cb) {
@@ -167,14 +160,18 @@ NosDesktopSync.prototype.commitPacket = function(packet, cb) {
 };
 
 NosDesktopSync.prototype.sendPacket = function(packet, cb) {
+    var self = this;
     // TODO send POST to endpoint registered for Desktop App
     // this.postEndpoint = ?
 
+    // If just starting or if the last packet has been received, reset first sent time
+    console.log('Packet status', self.packetStatus);
+    if (['ACK_OK', 'INIT'].indexOf(self.packetStatus) > -1) {
+        self.lastPacketFirstSent = Date.now();
+    }
+    
     console.log('Packet sent');
-    // setTimeout(() => {
-    // this.registerACK({packetId: packet._id});
     cb();
-    // }, 5000);
 };
 
 NosDesktopSync.prototype.resendLastPacket = function() {
@@ -190,6 +187,7 @@ NosDesktopSync.prototype.registerACK = function(ACK) {
     if (this.lastPacket) {
         if (this.lastPacket._id === ACK.packetId) {
             this.packetStatus = 'ACK_OK';
+            this.desktopStatus = 'online';
             // TODO Remove packet from sent packet list
             // TODO Remove packet from database
 
@@ -209,13 +207,13 @@ NosDesktopSync.prototype.registerACK = function(ACK) {
 NosDesktopSync.prototype.start = function() {
     var self = this;
 
-    if (this.engineStatus === 'running') {
+    if (self.engineStatus === 'running') {
         console.log('Sync Engine already running');
         return;
 
     } else {
         console.log('Sync engine starting...');
-        if (!this.database) {
+        if (!self.database) {
             console.log('No database configured. Stopping engine.');
             return;
         }
@@ -225,37 +223,54 @@ NosDesktopSync.prototype.start = function() {
     // Note: When Desktop is offline, use separate method for saving new events to database for later sync?
     //    OR: use Journal processing to determine change set at time desktop comes online?
 
+    //------------------------------------
+    // Main Sync Engine
+    //------------------------------------
     
     var iteration = 0;
     var _checkQueue = function() {
         iteration++;
         console.log('\nChecking queue, iteration:', iteration);
-
-        if (this.desktopStatus !== 'online') {
+        
+        // TODO Check desktop online status
+        // If desktop was offline but is now online, reset lastPacketFirstSent time
+        // if (self.desktopStatus === 'offline' && newStatus === 'online') {
+        //     self.lastPacketFirstSent = Date.now();
+        // }
+        
+        if (self.desktopStatus !== 'online') {
             console.log('Desktop is offline. Sync operations suspended.');
             return;
         }
 
-
         // Process queue
         if (self.msgQueue.length > 0) {
-            // test for whether ACK received for previous packet
+            // Test for whether ACK received for previous packet
             if (['ACK_OK', 'INIT'].indexOf(self.packetStatus) > -1 || self.ACK_OVERRIDE) {
                 self.processQueueForSyncOp();
 
             } else if (self.packetStatus === 'ACK_PENDING') {
-                // test time elapsed since last packet transmission
+                // Test time elapsed since last packet transmission
                 var timeSincePacket = Date.now() - self.lastPacketResent;
 
                 console.log('Awaiting ACK for last packet');
                 console.log('Time since packet:', timeSincePacket);
 
-                if (timeSincePacket > self.ackRate) {
+                var desktopLapsed = (Date.now() - self.lastPacketFirstSent) > self.desktopOfflineTimeout;
+                
+                // console.log('Last packet first sent:', self.lastPacketFirstSent);
+                // console.log('Online status timeout limit:', self.desktopOfflineTimeout);
+                
+                if (desktopLapsed) {
+                    // If it has been a while since packet was first sent, set desktopStatus to offline
+                    self.desktopStatus = 'offline';
+
+                } else if (timeSincePacket > self.ackRate) {
                     // If over certain limit... resend packet...
                     self.resendLastPacket();
                 }
-
-
+                
+                
             }
         } else {
             console.log('Queue empty');
@@ -263,8 +278,8 @@ NosDesktopSync.prototype.start = function() {
     };
 
     // Start Engine Loop
-    this.syncIntervalId = setInterval(_checkQueue, this.syncRate);
-    this.engineStatus = 'running';
+    self.syncIntervalId = setInterval(_checkQueue, self.syncRate);
+    self.engineStatus = 'running';
 };
 
 NosDesktopSync.prototype.stop = function() {
@@ -293,47 +308,56 @@ NosDesktopSync.prototype.configure = function(confObj) {
     // etc.
 };
 
+
+// Following method is only for use by Aurora
 NosDesktopSync.prototype.checkDesktopStatus = function() {
-    // var url = '/d/v1/desktopStatus/desktop';
-    // var Nos = require(currWorkingDir + '/lib/citta-cloud-fx/events/NosEventSubClient.js');
+    var apiStreamPersistence = require(currWorkingDir + '/lib/citta-cloud-fx/solaria/mongo/NosSolariaStore')();
+    var apiStreamModel = require(currWorkingDir + '/lib/citta-cloud-fx/solaria/mongo/NosSolariaModel')();
+    
+    apiStreamPersistence.getPrimaryContentDbByUser(req.user.id, storeConfig, function(err, contentDb) {
 
-    var apiStreamPersistence = require(currWorkingDir + '/lib/citta-cloud-fx/events/NosEventSubClient.js');
+
+        apiStreamModel.getCollectionByName('device', null, contentDb, user, app.db, function(err, deviceColl) {
+            res.send(deviceColl);
+        });
 
 
+    });
+    
 };
 
-exports = module.exports = NosDesktopSync;
+// exports = module.exports = NosDesktopSync;
 
 
 /*****************************************
  * SETUP FOR TESTING -- Not part of module
  *****************************************/
-/*
+
 function addSampleData(api) {
-    api.addMsgToQueue('Hello', 4);
-    setTimeout(() => api.addMsgToQueue('world', 8), 100);
-    setTimeout(() => api.addMsgToQueue('get', 8), 120);
-    setTimeout(() => api.addMsgToQueue('on', 15), 140);
-    setTimeout(() => api.addMsgToQueue('down', 16), 160);
-    setTimeout(() => api.addMsgToQueue('like', 23), 180);
-    setTimeout(() => api.addMsgToQueue('another', 15), 200);
-    setTimeout(() => api.addMsgToQueue('tasty', 15), 220);
-    setTimeout(() => api.addMsgToQueue('dance', 42), 240);
-    setTimeout(() => api.addMsgToQueue('craze?', 42), 260);
-    setTimeout(() => api.addMsgToQueue('no?', 43), 280);
-    setTimeout(() => api.addMsgToQueue('fine!', 44), 300);
-    setTimeout(() => api.addMsgToQueue('adfgadf?', 45), 320);
-    setTimeout(() => api.addMsgToQueue('sausage?', 46), 340);
-    setTimeout(() => api.addMsgToQueue('dfbadfbadbfdabf'), 360);
-    setTimeout(() => api.addMsgToQueue('heyooo!!', 48), 380);
-    setTimeout(() => api.addMsgToQueue('asdfasdfasdf?', 49), 400);
-    setTimeout(() => api.addMsgToQueue('flarf?', 50), 420);
-    setTimeout(() => api.addMsgToQueue('narf?', 50), 440);
-    setTimeout(() => api.addMsgToQueue('sausage?', 42), 460);
-    setTimeout(() => api.addMsgToQueue('derp', 42), 480);
-    setTimeout(() => api.addMsgToQueue('doo', 42), 500);
-    setTimeout(() => api.addMsgToQueue('sausagasdfasdfasdfasdfasdfe?', 42), 520);
-    setTimeout(() => api.addMsgToQueue({ what: 'what', the: 'hell', you: 'say' }, 98), 540);
+    setTimeout(() => api.addMsgToQueue('Hello', 4), 0);
+    setTimeout(() => api.addMsgToQueue('world.', 8), 100);
+    setTimeout(() => api.addMsgToQueue('One', 8), 120);
+    setTimeout(() => api.addMsgToQueue('two', 15), 140);
+    setTimeout(() => api.addMsgToQueue('three', 16), 160);
+    setTimeout(() => api.addMsgToQueue('four', 23), 180);
+    setTimeout(() => api.addMsgToQueue('get', 15), 200);
+    setTimeout(() => api.addMsgToQueue('your', 15), 220);
+    setTimeout(() => api.addMsgToQueue('booty', 42), 240);
+    setTimeout(() => api.addMsgToQueue('on the floor', 42), 260);
+    setTimeout(() => api.addMsgToQueue('Gotta', 43), 280);
+    setTimeout(() => api.addMsgToQueue('gotta', 44), 300);
+    setTimeout(() => api.addMsgToQueue('get up', 45), 320);
+    setTimeout(() => api.addMsgToQueue('to get', 46), 340);
+    setTimeout(() => api.addMsgToQueue('down.'), 360);
+    setTimeout(() => api.addMsgToQueue('Twas', 48), 380);
+    setTimeout(() => api.addMsgToQueue('brillig', 49), 400);
+    setTimeout(() => api.addMsgToQueue('and the', 50), 420);
+    setTimeout(() => api.addMsgToQueue('slithy', 50), 440);
+    setTimeout(() => api.addMsgToQueue('toves', 42), 460);
+    setTimeout(() => api.addMsgToQueue('did', 42), 480);
+    setTimeout(() => api.addMsgToQueue('gyre', 42), 500);
+    setTimeout(() => api.addMsgToQueue('and gimble', 42), 520);
+    setTimeout(() => api.addMsgToQueue('in the wabe.', 98), 540);
 }
 
 var sync = new NosDesktopSync({
@@ -347,4 +371,4 @@ var sync = new NosDesktopSync({
 
 
 addSampleData(sync);
-*/
+
