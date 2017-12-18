@@ -1,1 +1,1 @@
-# msq-desktop-replication
+# msq-desktop-sync
