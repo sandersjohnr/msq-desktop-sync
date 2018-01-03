@@ -4,7 +4,7 @@ function NosDesktopSync(configObj) {
     if (!(this instanceof NosDesktopSync)) {
         return new NosDesktopSync();
     }
-    
+
     // this.solariaStore = configObj.solariaStore;
     // this.solariaModel = configObj.solariaModel;
 
@@ -13,7 +13,7 @@ function NosDesktopSync(configObj) {
     this.debounceRate = configObj.debounceRate || 10 * 1000;
     this.syncRate = configObj.syncRate || 3 * 1000;
     this.ackRate = configObj.ackRate || 10 * 1000;
-    
+
     this.desktopOfflineTimeout = 20 * 1000;
 
     this.msgQueue = [];
@@ -97,14 +97,13 @@ NosDesktopSync.prototype.normalizeQueue = function() {
         }
     }
 
-    // Remove duplicate ids
-    idsToRemove = _.uniq(idsToRemove);
+    idsToRemove = _.uniq(idsToRemove); // Remove duplicate ids
 
     if (idsToRemove.length > 0) {
         console.log('Normalizing Queue -- Ids to remove:', idsToRemove);
         // console.log('Queue before normalizing:', this.msgQueue);
-        this.msgQueue = this.msgQueue.filter(function(item) { 
-            return _.indexOf(idsToRemove, item._id) === -1; 
+        this.msgQueue = this.msgQueue.filter(function(item) {
+            return _.indexOf(idsToRemove, item._id) === -1;
         });
         console.log('Normalized:', _.pluck(this.msgQueue, '_id'));
     }
@@ -123,7 +122,7 @@ NosDesktopSync.prototype.processQueueForSyncOp = function() {
 
     if (!debounceExpired()) {
         console.log('Waiting for debounce...');
-        
+
     } else {
         self.normalizeQueue();
 
@@ -135,7 +134,7 @@ NosDesktopSync.prototype.processQueueForSyncOp = function() {
             if (success) {
                 // Send packet to registered endpoint
                 self.sendPacket(packet, function () {
-                    
+
                     self.packetStatus = 'ACK_PENDING';
                     self.lastPacket = packet;
                     self.lastPacketResent = packet.timestamp;
@@ -169,7 +168,7 @@ NosDesktopSync.prototype.sendPacket = function(packet, cb) {
     if (['ACK_OK', 'INIT'].indexOf(self.packetStatus) > -1) {
         self.lastPacketFirstSent = Date.now();
     }
-    
+
     console.log('Packet sent');
     cb();
 };
@@ -226,18 +225,13 @@ NosDesktopSync.prototype.start = function() {
     //------------------------------------
     // Main Sync Engine
     //------------------------------------
-    
+
     var iteration = 0;
     var _checkQueue = function() {
         iteration++;
         console.log('\nChecking queue, iteration:', iteration);
-        
-        // TODO Check desktop online status
-        // If desktop was offline but is now online, reset lastPacketFirstSent time
-        // if (self.desktopStatus === 'offline' && newStatus === 'online') {
-        //     self.lastPacketFirstSent = Date.now();
-        // }
-        
+
+
         if (self.desktopStatus !== 'online') {
             console.log('Desktop is offline. Sync operations suspended.');
             return;
@@ -257,10 +251,10 @@ NosDesktopSync.prototype.start = function() {
                 console.log('Time since packet:', timeSincePacket);
 
                 var desktopLapsed = (Date.now() - self.lastPacketFirstSent) > self.desktopOfflineTimeout;
-                
+
                 // console.log('Last packet first sent:', self.lastPacketFirstSent);
                 // console.log('Online status timeout limit:', self.desktopOfflineTimeout);
-                
+
                 if (desktopLapsed) {
                     // If it has been a while since packet was first sent, set desktopStatus to offline
                     self.desktopStatus = 'offline';
@@ -269,8 +263,8 @@ NosDesktopSync.prototype.start = function() {
                     // If over certain limit... resend packet...
                     self.resendLastPacket();
                 }
-                
-                
+
+
             }
         } else {
             console.log('Queue empty');
@@ -295,9 +289,8 @@ NosDesktopSync.prototype.stop = function() {
 
 NosDesktopSync.prototype.receivePacket = function(recdPacket) {
     // This method will be called by endpoint receiving the packet
-    var msgList = recdPacket.msgList;
-
-    msgList.forEach(function(msg) {
+    // TODO this is more complicated, as we need to verify application of each individual message 
+    recdPacket.msgList.forEach(function(msg) {
         // Apply event message to device / Aurora
     });
 };
@@ -309,21 +302,23 @@ NosDesktopSync.prototype.configure = function(confObj) {
 };
 
 
-// Following method is only for use by Aurora
+// Following method is only for use by Aurora 
 NosDesktopSync.prototype.checkDesktopStatus = function() {
     var apiStreamPersistence = require(currWorkingDir + '/lib/citta-cloud-fx/solaria/mongo/NosSolariaStore')();
     var apiStreamModel = require(currWorkingDir + '/lib/citta-cloud-fx/solaria/mongo/NosSolariaModel')();
-    
-    apiStreamPersistence.getPrimaryContentDbByUser(req.user.id, storeConfig, function(err, contentDb) {
 
+    apiStreamPersistence.getPrimaryContentDbByUser(req.user.id, storeConfig, function(err, contentDb) {
 
         apiStreamModel.getCollectionByName('device', null, contentDb, user, app.db, function(err, deviceColl) {
             res.send(deviceColl);
         });
 
-
     });
-    
+};
+
+NosDesktopSync.prototype.setDesktopOnline = function(status) {
+    this.desktopStatus = 'online';
+    this.lastPacketFirstSent = Date.now();
 };
 
 // exports = module.exports = NosDesktopSync;
@@ -332,9 +327,9 @@ NosDesktopSync.prototype.checkDesktopStatus = function() {
 /*****************************************
  * SETUP FOR TESTING -- Not part of module
  *****************************************/
-
+/*
 function addSampleData(api) {
-    setTimeout(() => api.addMsgToQueue('Hello', 4), 0);
+    api.addMsgToQueue('Hello', 4);
     setTimeout(() => api.addMsgToQueue('world.', 8), 100);
     setTimeout(() => api.addMsgToQueue('One', 8), 120);
     setTimeout(() => api.addMsgToQueue('two', 15), 140);
@@ -368,7 +363,6 @@ var sync = new NosDesktopSync({
     database: 'mine'
 });
 
-
-
 addSampleData(sync);
+*/
 
